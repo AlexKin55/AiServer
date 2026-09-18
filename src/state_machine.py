@@ -98,8 +98,6 @@ class SessionStateMachine:
             if self.state is not State.RECORDING:
                 self.rec.begin()
                 self.state = State.RECORDING
-                # Начался диалог — сбрасываем отсчёт автосмены эмоций.
-                self.emotions.touch()
                 logger.info("VAD: робот начал запись (RECORD:start)")
                 # Потоковое распознавание: PCM-чанки уходят в Yandex сразу,
                 # partial-текст приходит по мере речи (не ждём конца файла).
@@ -119,6 +117,11 @@ class SessionStateMachine:
             # досылается последний чанк, финализируем запись.
             if self.state is State.RECORDING:
                 logger.info("VAD: робот закончил запись (RECORD:stop)")
+                # Диалог завершён (речь кончилась) — отсчёт автосмены эмоций
+                # стартует от конца записи, а не от её начала: при долгой
+                # финализации (STT+GPT+TTS) decay не успевает отправить
+                # EMOTION:sad раньше/во время озвучки ответа.
+                self.emotions.touch()
                 # Не блокируем цикл приёма сообщений: STT -> GPT -> TTS идёт
                 # в фоновой задаче, озвучка уходит роботу сразу по готовности
                 # синтеза (робот всё время слушает сокет). Снимок сегмента
@@ -274,6 +277,13 @@ class SessionStateMachine:
                                     tag, len(pcm_out),
                                     time.monotonic() - t_tts)
                         if pcm_out:
+                            # Ответ TTS готов — на время озвучки переключаем
+                            # робота на эмоцию «doubt» (задумался), чтобы лицо
+                            # отражало процесс говорения ответа.
+                            ok_doubt = await self.bot.send_text("EMOTION:doubt")
+                            logger.info("[%s] TTS: готово -> EMOTION:doubt "
+                                        "(%s)", tag,
+                                        "ok" if ok_doubt else "НЕТ СОЕДИНЕНИЯ")
                             # Сохраняем озвучку в WAV для проверки
                             # (records/out_robot_*.wav), затем шлём роботу.
                             try:
