@@ -20,6 +20,7 @@ import logging
 import time
 
 from . import config as app_config
+from . import emotions as emotions_mod
 from . import recorder as recorder_mod
 from . import robot as robot_mod
 
@@ -32,6 +33,10 @@ AUDIO_CODEC_PCM = app_config.CONFIG["audio"]["codec_pcm"]
 # Текстовые команды протокола (робот -> сервер) в VAD-режиме.
 CMD_RECORD_START = "RECORD:START"
 CMD_RECORD_STOP = "RECORD:STOP"
+
+# Автосмена эмоций при простое: (эмоция, доп. задержка от начала отсчёта, с).
+# После последнего диалога: +10 с -> Neutral, +20 с -> Sad, +30 с -> Sleepy.
+EMOTION_DECAY_STAGES = (("neutral", 10.0), ("sad", 10.0), ("sleepy", 10.0))
 
 
 class State(enum.Enum):
@@ -52,6 +57,18 @@ class SessionStateMachine:
         self.last_answer: dict = {}
         # Фоновая задача финализации сегмента (STT -> GPT -> TTS -> озвучка).
         self._finalize_task: asyncio.Task | None = None
+        # Невостребованные ACK:MOVE:* от робота (движения выполняются
+        # асинхронно в motionTask прошивки; ACK приходит по завершении).
+        self._move_ack_pending: list[str] = []
+        # Автосмена эмоций при простое (Neutral -> Sad -> Sleepy после
+        # последнего диалога); touch() вызывается из on_text/_finalize.
+        self.emotions = emotions_mod.EmotionController(
+            lambda name: self.bot.send_text(f"EMOTION:{name}"))
+        # Автосмена эмоций при простое: отсчёт от последней активности
+        # (диалога); событие сбрасывает/перезапускает отсчёт.
+        self._emotion_reset = asyncio.Event()
+        self._emotion_loop_task: asyncio.Task | None = None
+        self._emotion_since: float = 0.0
 
     # ------------------------------------------------------------------
     # События от робота.
@@ -59,6 +76,7 @@ class SessionStateMachine:
     async def on_connected(self) -> None:
         logger.info("Робот подключён: %s", self.bot.peer)
         self.state = State.IDLE
+        self.emotions.start()
 
     async def on_disconnected(self) -> None:
         logger.info("Робот отключён")
@@ -80,6 +98,8 @@ class SessionStateMachine:
             if self.state is not State.RECORDING:
                 self.rec.begin()
                 self.state = State.RECORDING
+                # Начался диалог — сбрасываем отсчёт автосмены эмоций.
+                self.emotions.touch()
                 logger.info("VAD: робот начал запись (RECORD:start)")
                 # Потоковое распознавание: PCM-чанки уходят в Yandex сразу,
                 # partial-текст приходит по мере речи (не ждём конца файла).
@@ -122,7 +142,34 @@ class SessionStateMachine:
             # обрываем, если HB перестал приходить.
             logger.info("HB от робота")
             return
+        # Подтверждения движений: ACK:MOVE:<ось>[:<градусы>] присылает
+        # motionTask прошивки только ПОСЛЕ фактического завершения поворота —
+        # на них может ждать танцевальный паттерн (см. wait_move_ack).
+        if cmd.startswith("ACK:MOVE"):
+            self._move_ack_pending.append(text.strip())
+            return
         # Прочий служебный текст — просто логируем.
+
+    async def wait_move_ack(self, axis: str, deg: int,
+                            timeout: float = 8.0) -> bool:
+        """Ждёт ACK:MOVE от робота — сигнал фактического завершения движения.
+
+        Движения выполняются асинхронно (motionTask прошивки), и ACK:MOVE:<ось>
+        [: <градусы>] приходит только после окончания поворота (waitMotion).
+        Невостребованные ACK не теряются: хранятся в _move_ack_pending до
+        совпадения или таймаута. Возвращает True, если движение подтверждено.
+        """
+        want = f"ack:move:{axis}" + ("" if axis == "center" else f":{deg}")
+        deadline = time.monotonic() + timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            for i, ack in enumerate(self._move_ack_pending):
+                if ack.strip().lower() == want:
+                    del self._move_ack_pending[i]
+                    return True
+            await asyncio.sleep(min(0.02, remaining))
 
     async def on_audio(self, data: bytes) -> None:
         if self.state is State.RECORDING:
@@ -186,7 +233,29 @@ class SessionStateMachine:
                     logger.info("[%s] GPT: ответ=%r (%.1fs, %d символов)",
                                 tag, answer,
                                 time.monotonic() - t_gpt, len(answer))
+                # Хвост «\n\nEmotion: Happy» — команда роботу, а не речь:
+                # вырезаем из текста для TTS. Обычные эмоции уходят командой
+                # EMOTION:<name>, а «Dancing» запускает танцевальный паттерн
+                # (команды EMOTION:dancing в протоколе робота нет).
+                answer, emotion = yandex_mod.split_emotion(answer)
+                if emotion == "dancing":
+                    logger.info("[%s] EMOTION: dancing -> танец (фон)", tag)
+                    # Танец крутится в фоне, чтобы не задерживать озвучку;
+                    # каждый следующий шаг стартует после ACK:MOVE от робота
+                    # (движение реально завершилось), а не по фиксированной
+                    # паузе — ритм танца = скорость сервоприводов.
+                    async def _dance() -> None:
+                        await self.bot.dancing(
+                            wait_ack=self.wait_move_ack,
+                            ack_timeout=8.0)
+                    asyncio.create_task(_dance())
+                elif emotion:
+                    logger.info("[%s] EMOTION: %s -> робот", tag, emotion)
+                    ok_emo = await self.bot.send_text(f"EMOTION:{emotion}")
+                    logger.info("[%s] EMOTION: отправка -> %s", tag,
+                                "ok" if ok_emo else "НЕТ СОЕДИНЕНИЯ")
                 info["answer"] = answer
+                info["emotion"] = emotion
                 self.last_answer = {"recognized": text, "answer": answer}
                 logger.info("[%s] Распознано: %s", tag, text)
                 logger.info("[%s] Ответ GPT: %s", tag, answer)
@@ -235,6 +304,9 @@ class SessionStateMachine:
         except Exception as exc:  # noqa: BLE001
             logger.exception("Yandex STT/GPT error: %s", exc)
             info["recognize_error"] = str(exc)
+        # Диалог завершён — стартует отсчёт автосмены эмоций (Neutral ->
+        # Sad -> Sleepy через каждые 10 с, если не было новых диалогов).
+        self.emotions.touch()
         return True, info
 
     async def _send_pcm_chunks(self, pcm: bytes, tag: str, rate: int) -> bool:

@@ -152,7 +152,7 @@ def _stream_recognize(pcm: bytes, language_code: str = "ru-RU",
                                             timeout=poll_timeout_s):
             event_type = resp.WhichOneof("Event")
             if event_type == "status_code":
-                logger.info("STT v3 status_code=%s: %s",
+                logger.debug("STT v3 status_code=%s: %s",
                             resp.status_code.code_type,
                             resp.status_code.message or "")
                 continue
@@ -315,7 +315,7 @@ class StreamingRecognizer:
                                                 metadata=metadata):
                 ev = resp.WhichOneof("Event")
                 if ev == "status_code":
-                    logger.info("STT v3 status_code=%s: %s",
+                    logger.debug("STT v3 status_code=%s: %s",
                                 resp.status_code.code_type,
                                 resp.status_code.message or "")
                     continue
@@ -349,6 +349,39 @@ def default_system_prompt() -> str:
         return str(app_config.CONFIG.get("yandex", {}).get("system_prompt", ""))
     except Exception:  # noqa: BLE001
         return ""
+
+
+# Имена эмоций робота — команда EMOTION:<name> в протоколе AiBot.
+# GPT дописывает их в конец ответа после ключевого слова «Emotion:»
+# (ровно в таком виде, без перевода). «dancing» — особая: отдельной команды
+# EMOTION:dancing в протоколе нет, она запускает танцевальный паттерн
+# (RobotSession.dancing()).
+ROBOT_EMOTIONS = ("neutral", "happy", "angry", "sad", "doubt", "sleepy",
+                  "dancing")
+
+
+def split_emotion(text: str) -> tuple[str, str | None]:
+    """Извлекает команду эмоции из конца ответа GPT.
+
+    GPT по промпту дописывает в конец ответа строку вида «\\n\\nEmotion: Happy»
+    (значения — только ROBOT_EMOTIONS) — это команда роботу показать эмоцию,
+    а не часть речи: в TTS она попадать не должна, а роботу уходит отдельной
+    текстовой командой EMOTION:<name>.
+
+    Возвращает (текст без команды эмоции, имя эмоции или None).
+    """
+    if not text:
+        return text, None
+    stripped = text.strip()
+    m = re.search(
+        r"(?is)\bemotion\s*[:：]\s*([a-z]+)\s*$",
+        stripped)
+    if not m:
+        return text, None
+    name = m.group(1).strip().lower()
+    if name in ROBOT_EMOTIONS:
+        return stripped[:m.start()].rstrip(), name
+    return text, None
 
 
 def ask_gpt(user_text: str, system_prompt: str = "",

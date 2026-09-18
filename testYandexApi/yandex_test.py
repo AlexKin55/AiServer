@@ -185,6 +185,13 @@ def main() -> int:
     t1 = time.monotonic()
     answer = yandex.ask_gpt(text, system_prompt=yandex.default_system_prompt())
     print(f"[yandex] GPT: {time.monotonic() - t1:.2f}s, ответ: {answer}")
+    # «\n\nEmotion: Happy» — команда роботу показать эмоцию, не часть речи:
+    # вырезаем перед TTS (эмоция печатается для информации).
+    answer, emotion = yandex.split_emotion(answer)
+    if emotion:
+        hint = "запуск танца" if emotion == "dancing" \
+            else f"команда EMOTION:{emotion}"
+        print(f"[yandex] эмоция: {emotion} ({hint})")
     if not answer:
         print("[yandex] GPT не вернул ответ — озвучка пропущена")
         return 1

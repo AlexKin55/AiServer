@@ -19,9 +19,7 @@ HTTP-интерфейс:
 
 Запуск:  uvicorn server:app --host 0.0.0.0 --port 9001
 """
-import asyncio
 import logging
-import time
 
 from fastapi import FastAPI, HTTPException, WebSocket
 
@@ -42,37 +40,6 @@ rec = recorder_mod.Recorder(record_dir=app_config.CONFIG["recording"]["record_di
 sm = SessionStateMachine(bot, rec)
 
 app = FastAPI(title="AIBot WebSocket Client")
-
-
-# Сколько ждать последний неполный PCM-чанк после RECORD:stop.
-TAIL_WAIT_SECONDS = 2.5
-
-
-async def _feed_tail(sm: SessionStateMachine, ws: WebSocket) -> None:
-    """Дочитывает хвостовые PCM-чанки после текстовой команды RECORD:stop.
-
-    Робот по завершении сегмента (тишина/таймаут) сначала шлёт RECORD:stop,
-    а сразу за ним — последний неполный чанк (до 2 с аудио). Порядок TCP
-    гарантирован, но финализация (Yandex STT) занимает секунды, поэтому чанк
-    нужно забрать здесь, иначе конец фразы потеряется.
-    """
-    deadline = time.monotonic() + TAIL_WAIT_SECONDS
-    while True:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            return
-        try:
-            msg = await asyncio.wait_for(ws.receive(), timeout=remaining)
-        except asyncio.TimeoutError:
-            return
-        if msg["type"] == "websocket.disconnect":
-            return
-        data = msg.get("bytes")
-        if data is not None and len(data) >= 2 \
-                and data[0] == AUDIO_TYPE and data[1] == AUDIO_CODEC_PCM:
-            await sm.on_audio(data[2:])
-            # Чанк получен — даём ещё короткое окно на доп. пакеты.
-            deadline = min(deadline, time.monotonic() + 0.6)
 
 
 @app.websocket("/")
@@ -99,9 +66,9 @@ async def ws_endpoint(ws: WebSocket):
                 continue
             text = msg.get("text")
             if text is not None:
-                if text.strip().upper() == "RECORD:STOP":
-                    # Забрать хвостовой чанк до финализации (VAD-режим).
-                    await _feed_tail(sm, ws)
+                # Ждать хвостовые чанки не нужно: к моменту RECORD:stop все
+                # PCM-чанки речи уже получены (робот шлёт после стопа только
+                # остаток тишины), поэтому сразу отдаём команду финализации.
                 await sm.on_text(text)
     finally:
         await sm.on_disconnected()
