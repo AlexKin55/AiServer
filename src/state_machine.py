@@ -60,6 +60,9 @@ class SessionStateMachine:
         # Невостребованные ACK:MOVE:* от робота (движения выполняются
         # асинхронно в motionTask прошивки; ACK приходит по завершении).
         self._move_ack_pending: list[str] = []
+        # Barge-in: робот прислал PLAYBACK:INTERRUPT (пользователь перебил
+        # озвучку) — сервер прекращает отправку оставшихся PCM-чанков.
+        self._playback_interrupted = False
         # Автосмена эмоций при простое (Neutral -> Sad -> Sleepy после
         # последнего диалога); touch() вызывается из on_text/_finalize.
         self.emotions = emotions_mod.EmotionController(
@@ -96,6 +99,15 @@ class SessionStateMachine:
             # VAD-режим: робот сам определил речь (резкий рост шума)
             # и начал слать PCM-чанки.
             if self.state is not State.RECORDING:
+                # Barge-in: новая речь перебивает старую озвучку/финализацию.
+                # Отменяем задачу, чтобы TTS старого сегмента не начал играть
+                # посреди новой записи (или уже играющий поток не продолжился).
+                if (self._finalize_task is not None
+                        and not self._finalize_task.done()):
+                    logger.info("VAD: новая речь прерывает прошлую финализацию")
+                    self._finalize_task.cancel()
+                self._finalize_task = None
+                self._playback_interrupted = False
                 self.rec.begin()
                 self.state = State.RECORDING
                 logger.info("VAD: робот начал запись (RECORD:start)")
@@ -122,6 +134,8 @@ class SessionStateMachine:
                 # финализации (STT+GPT+TTS) decay не успевает отправить
                 # EMOTION:sad раньше/во время озвучки ответа.
                 self.emotions.touch()
+                # Сегмент закрыт — прерывание озвучки больше не актуально.
+                self._playback_interrupted = False
                 # Не блокируем цикл приёма сообщений: STT -> GPT -> TTS идёт
                 # в фоновой задаче, озвучка уходит роботу сразу по готовности
                 # синтеза (робот всё время слушает сокет). Снимок сегмента
@@ -138,6 +152,12 @@ class SessionStateMachine:
                     self._finalize(pcm, stt, tag=seg_tag))
             else:
                 logger.info("RECORD:stop вне сегмента — игнорирую")
+            return
+        if cmd == "PLAYBACK:INTERRUPT":
+            # Barge-in: прошивка услышала пользователя и оборвала озвучку —
+            # прекращаем слать оставшиеся PCM-чанки текущего ответа.
+            logger.info("Робот перебил озвучку (barge-in)")
+            self._playback_interrupted = True
             return
         if cmd == "HB":
             # Heartbeat робота (каждые 15 с): держит NAT/Wi-Fi живым, чтобы
@@ -350,6 +370,12 @@ class SessionStateMachine:
                     "speed x%.2f)", tag, len(pcm), n_chunks, chunk_dur,
                     play_speed)
         for idx in range(n_chunks):
+            # Barge-in: робот перебил озвучку (PLAYBACK:INTERRUPT) —
+            # останавливаем отправку оставшихся чанков.
+            if self._playback_interrupted:
+                logger.info("[%s] PLAY: озвучка прервана роботом (barge-in), "
+                            "остановка отправки", tag)
+                break
             part = pcm[idx * chunk_size:(idx + 1) * chunk_size]
             ok = await self.bot.send_audio_frame(
                 AUDIO_TYPE, AUDIO_CODEC_PCM, part)
@@ -365,7 +391,7 @@ class SessionStateMachine:
                 break
             # Пауза = длительность чанка / скорость доставки.
             await asyncio.sleep(chunk_dur / play_speed)
-        if sent_any:
+        if sent_any and not self._playback_interrupted:
             # Маркер конца озвучки: пустой аудиофрейм [тип][кодек][0 байт].
             # Прошивка робота возвращает микрофон (VAD) при приходе нового
             # чанка — пустой чанк даёт ей триггер «поток закончился».
