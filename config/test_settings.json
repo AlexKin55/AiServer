@@ -1,0 +1,15 @@
+{
+  "_comment": "Дополнительный конфиг для интеграционных тестов (tests/*) и теста Yandex API (testYandexApi/yandex_test.py). Наслаивается поверх config/settings.json. Путь можно переопределить переменной AISERVER_TEST_CONFIG.",
+
+  "tests": {
+    "_comment": "Параметры интеграционных тестов. yandex_api_file — PCM/WAV-файл (16 кГц/моно) для распознавания тестом testYandexApi (путь относительно корня AiServer); playback_file — готовый PCM/WAV-файл (16 кГц/моно), который тест tests/audio.py отправляет роботу на воспроизведение (путь относительно корня AiServer); укажите имя реального файла, например test_records/in_robot_audio_<timestamp>.wav.",
+    "ack_timeout_s": 5.0,
+    "audio_timeout_s": 10.0,
+    "move_timeout_s": 8.0,
+    "record_seconds": 5.0,
+    "audio_chunk_seconds": 2.0,
+    "record_dir": "test_records",
+    "yandex_api_file": "test_records/in_robot_audio_example.wav",
+    "playback_file": "test_records/in_robot_audio_example.wav"
+  }
+}

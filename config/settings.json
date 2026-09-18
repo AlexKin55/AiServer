@@ -1,0 +1,44 @@
+{
+  "_comment": "Единый конфиг сервера AiServer. Используется сервером (src/*), тестами (tests/*) и скриптами. Путь можно переопределить переменной AISERVER_CONFIG. Параметры только для тестов — в config/test_settings.json.",
+
+  "wifi": {
+    "_comment": "Настройки Wi-Fi робота (информационные; соответствуют config/config.h прошивки).",
+    "ssid": "MGTS_GPON_AEDE",
+    "pass": "GxhpbRa7"
+  },
+
+  "websocket": {
+    "_comment": "Параметры WebSocket-сервера (робот подключается к ws://host:port/path).",
+    "host": "0.0.0.0",
+    "port": 9001,
+    "path": "/"
+  },
+
+  "audio": {
+    "_comment": "Формат аудиофреймов протокола. Единственный кодек — codec_pcm=1: сырой PCM int16 LE, 16 кГц/моно (без компрессии). play_chunk_seconds — длительность чанка озвучки сервер->робот: WebSocket-клиент робота не принимает фреймы >~8 КБ (32 КБ роняют соединение), поэтому чанк 50 мс (1600 Б) проверен; переключение I2S в прошивке сессионное (не по чанкам), размер можно менять в пределах до ~0.25 с. play_speed — скорость доставки потока озвучки (1.0 = реальное время, больше 1 = быстрее, меньше = медленнее).",
+    "sample_rate": 16000,
+    "channels": 1,
+    "bits_per_sample": 16,
+    "frame_type": 1,
+    "codec_pcm": 1,
+    "play_chunk_seconds": 0.1,
+    "play_speed": 1.0
+  },
+
+  "recording": {
+    "_comment": "Каталог для сохраняемых записей (можно переопределить env RECORD_DIR).",
+    "record_dir": "records"
+  },
+
+  "yandex": {
+    "_comment": "Креды Yandex Cloud для STT/GPT/TTS. Подставляются из env (${VAR}): YANDEX_API_KEY (Api-Key) + обязательный YANDEX_FOLDER_ID.",
+    "api_key": "${YANDEX_API_KEY}",
+    "folder_id": "${YANDEX_FOLDER_ID}",
+    "system_prompt": "Ты веселый собесебник, говорящий по-русски, который шутит и отвечает на вопросы и смеется. Пользователь задал тебе вопрос, или что-то сказал.",
+    "gpt_model": "yandexgpt/latest",
+    "gpt_timeout_s": 90,
+    "tts_voice": "alena",
+    "tts_speed": 1.1,
+    "tts_role": "good"
+  }
+}
